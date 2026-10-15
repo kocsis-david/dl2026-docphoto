@@ -1,16 +1,7 @@
 """Turn a trained checkpoint into a Kaggle submission file.
 
-    python -m src.predict --config configs/cnn.yaml \
-                          --checkpoint models/cnn_best.pt \
-                          --out submissions/cnn_best.csv
-
-This file is a skeleton. The parts that define the *submission contract* are
-written out, because getting them wrong wastes a submission. The parts that are
-your model are marked TODO; for the lab 3 MLP they are: rebuild the model from
-the checkpoint (it stores the config, the input size and the standardiser),
-turn one image into pixels with `pixels_of_image`, standardise them with the
-stored mean and scale, and run the model. This is homework, since the competition is not open
-yet, and it is the first thing to test when it opens.
+    python -m src.predict --checkpoint models/lab3_mlp.pt \
+                          --out submissions/lab3_mlp.csv
 
 THE CONTRACT
 ------------
@@ -44,37 +35,35 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-import yaml
+import torch
+
+from src.data.dataset import pixels_of_image
+from src.models.mlp import MLP
 
 
-def load_model(checkpoint: Path, cfg: dict):
-    """Rebuild the architecture from the config and load the saved weights.
-
-    Put the model in eval mode and disable gradients. Return something callable
-    that maps one preprocessed image to one float.
-    """
-    raise NotImplementedError("TODO: build the model and load the checkpoint")
-
-
-def preprocess(image_path: Path, cfg: dict):
-    """Read one image and turn it into model input.
-
-    This must match training exactly. A resize or a normalisation that differs
-    between training and prediction is the single most common reason a good
-    validation score turns into a bad leaderboard score.
-    """
-    raise NotImplementedError("TODO: load and preprocess a single image")
+def load_model(checkpoint: Path) -> tuple[MLP, dict]:
+    bundle = torch.load(checkpoint, map_location="cpu")
+    cfg = bundle["config"]
+    net = MLP(in_dim=bundle["in_dim"], hidden=list(cfg["model"]["hidden"]), dropout=cfg["model"]["dropout"])
+    net.load_state_dict(bundle["state_dict"])
+    return net.eval(), bundle
 
 
-def predict_one(model, image_path: Path, cfg: dict) -> float:
-    """One image in, one number out."""
-    raise NotImplementedError("TODO: run the model, return a float in [0, 1]")
+def preprocess(image_path: Path, bundle: dict) -> np.ndarray:
+    x = pixels_of_image(image_path, bundle["config"]["data"]["pixel_size"])
+    return (x - bundle["scaler_mean"]) / bundle["scaler_scale"]
+
+
+@torch.no_grad()
+def predict_one(model: MLP, image_path: Path, bundle: dict) -> float:
+    x = torch.as_tensor(preprocess(image_path, bundle), dtype=torch.float32)[None]
+    return float(model(x)[0])
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Write a Kaggle submission file")
-    ap.add_argument("--config", required=True)
     ap.add_argument("--checkpoint", required=True,
                     help="the weights that will produce this submission")
     ap.add_argument("--test-dir", default="data/raw/test",
@@ -84,9 +73,6 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="where to write the submission CSV")
     a = ap.parse_args()
 
-    with open(a.config) as f:
-        cfg = yaml.safe_load(f)
-
     # The sample submission is the source of truth for which ids exist and in
     # what order. Build the output from it rather than from a directory listing,
     # and the two can never disagree.
@@ -94,7 +80,7 @@ def main() -> None:
     if list(sample.columns) != ["image_id", "usability"]:
         raise SystemExit(f"unexpected sample columns: {list(sample.columns)}")
 
-    model = load_model(Path(a.checkpoint), cfg)
+    model, bundle = load_model(Path(a.checkpoint))
     test_dir = Path(a.test_dir)
 
     predictions = []
@@ -102,7 +88,7 @@ def main() -> None:
         image_path = test_dir / f"{image_id}.jpg"
         if not image_path.exists():
             raise SystemExit(f"missing test image: {image_path}")
-        predictions.append(predict_one(model, image_path, cfg))
+        predictions.append(predict_one(model, image_path, bundle))
 
     out = pd.DataFrame({"image_id": sample["image_id"], "usability": predictions})
     out["usability"] = out["usability"].clip(0.0, 1.0)

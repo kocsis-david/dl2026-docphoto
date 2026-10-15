@@ -21,3 +21,4 @@ ipywidgets==8.1.5
 
 pytest==8.3.3
 ruff==0.6.9
+kaggle==1.8.4
